@@ -39,6 +39,10 @@ for (i in seq_along(best_genes)) {
 }
 cat(sprintf("\nTotal: %d genes\n\n", length(best_genes)))
 
+# Named constants (adjust if needed)
+FALLBACK_MAX_GENES       <- 20   # max candidates to scan in ML importance fallback
+CLASSIFICATION_THRESHOLD <- 0.5  # probability cut-off for sensitivity/specificity
+
 # ============================================
 # Helper: log2 normalise + quantile normalise
 # ============================================
@@ -49,8 +53,8 @@ preprocess_expr <- function(expr_raw) {
   if (min_val < 0) {
     expr_log <- expr_log - min_val + 1
   }
-  # Remove rows that are entirely NaN
-  nan_rows  <- rowSums(is.nan(expr_log)) == ncol(expr_log)
+  # Remove rows where every value is missing (NA or NaN)
+  nan_rows  <- rowSums(is.na(expr_log) | is.nan(expr_log)) == ncol(expr_log)
   expr_log  <- expr_log[!nan_rows, , drop = FALSE]
   expr_norm <- normalize.quantiles(as.matrix(expr_log))
   rownames(expr_norm) <- rownames(expr_log)
@@ -214,7 +218,7 @@ if (length(available_genes) < 2) {
   rf_importance   <- ml_results$rf_importance
   available_genes <- character(0)
 
-  for (i in seq_len(min(20, nrow(rf_importance)))) {
+  for (i in seq_len(min(FALLBACK_MAX_GENES, nrow(rf_importance)))) {
     gene <- rf_importance$Gene[i]
     if (gene %in% gene_symbols_25906 && gene %in% gene_symbols_60438) {
       available_genes <- c(available_genes, gene)
@@ -242,6 +246,10 @@ extract_gene_expr <- function(expr_norm, gene_symbols, genes, dataset_name) {
   for (gene in genes) {
     idx <- which(gene_symbols == gene)
     if (length(idx) > 0) {
+      if (length(idx) > 1) {
+        cat(sprintf("  ⚠ %s has %d probes in %s; using the first one.\n",
+                    gene, length(idx), dataset_name))
+      }
       result_list[[gene]] <- expr_norm[idx[1], ]
       cat(sprintf("  ✓ %s found in %s\n", gene, dataset_name))
     } else {
@@ -278,9 +286,9 @@ run_validation <- function(expr_data, group, dataset_name) {
   expr_mat <- t(expr_data)
   data_val <- as.data.frame(expr_mat)
   data_val$PE_status <- as.numeric(group) - 1   # 0 = Control, 1 = PE
+  # Apply make.names() once; derive gene column names from the resulting data frame
   colnames(data_val) <- make.names(colnames(data_val))
-
-  gene_cols    <- make.names(rownames(expr_data))
+  gene_cols    <- head(colnames(data_val), -1)   # all but PE_status
   formula_str  <- paste("PE_status ~", paste(gene_cols, collapse = " + "))
 
   tryCatch({
@@ -289,7 +297,7 @@ run_validation <- function(expr_data, group, dataset_name) {
     roc_obj    <- roc(data_val$PE_status, pred_prob, quiet = TRUE)
     auc_val    <- as.numeric(roc_obj$auc)
 
-    pred_class  <- ifelse(pred_prob > 0.5, 1, 0)
+    pred_class  <- ifelse(pred_prob > CLASSIFICATION_THRESHOLD, 1, 0)
     tp <- sum(pred_class == 1 & data_val$PE_status == 1)
     tn <- sum(pred_class == 0 & data_val$PE_status == 0)
     fp <- sum(pred_class == 1 & data_val$PE_status == 0)
