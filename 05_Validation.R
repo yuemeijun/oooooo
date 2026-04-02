@@ -11,6 +11,12 @@
 #
 # Dependencies: GEOquery, limma, preprocessCore, pROC
 
+# ============================================
+# Configuration
+# ============================================
+FALLBACK_MAX_GENES       <- 20   # max candidates to scan in ML importance fallback
+CLASSIFICATION_THRESHOLD <- 0.5  # probability cut-off for sensitivity/specificity
+
 cat("\n╔════════════════════════════════════════════════════════════════╗\n")
 cat("║          Step 5: Validation on Independent Datasets          ║\n")
 cat("╚════════════════════════════════════════════════════════════════╝\n\n")
@@ -38,10 +44,6 @@ for (i in seq_along(best_genes)) {
   cat(sprintf("  %d. %s\n", i, best_genes[i]))
 }
 cat(sprintf("\nTotal: %d genes\n\n", length(best_genes)))
-
-# Named constants (adjust if needed)
-FALLBACK_MAX_GENES       <- 20   # max candidates to scan in ML importance fallback
-CLASSIFICATION_THRESHOLD <- 0.5  # probability cut-off for sensitivity/specificity
 
 # ============================================
 # Helper: log2 normalise + quantile normalise
@@ -282,14 +284,23 @@ cat("[5.7] Building validation models...\n\n")
 
 run_validation <- function(expr_data, group, dataset_name) {
 
-  # Transpose to samples × genes
-  expr_mat <- t(expr_data)
-  data_val <- as.data.frame(expr_mat)
+  # Transpose to samples × genes; apply make.names() upfront for consistent names
+  gene_cols <- make.names(rownames(expr_data))
+  expr_mat  <- t(expr_data)
+  data_val  <- as.data.frame(expr_mat)
+  colnames(data_val) <- gene_cols
   data_val$PE_status <- as.numeric(group) - 1   # 0 = Control, 1 = PE
-  # Apply make.names() once; derive gene column names from the resulting data frame
-  colnames(data_val) <- make.names(colnames(data_val))
-  gene_cols    <- head(colnames(data_val), -1)   # all but PE_status
   formula_str  <- paste("PE_status ~", paste(gene_cols, collapse = " + "))
+
+  # Guard against degenerate group composition
+  n_positive <- sum(data_val$PE_status == 1)
+  n_negative <- sum(data_val$PE_status == 0)
+  if (n_positive == 0 || n_negative == 0) {
+    cat(sprintf("✗ %s — Error: only one class present (PE=%d, Control=%d)\n\n",
+                dataset_name, n_positive, n_negative))
+    return(list(auc = NA, sensitivity = NA, specificity = NA,
+                accuracy = NA, roc_obj = NULL, model = NULL, predictions = NULL))
+  }
 
   tryCatch({
     model      <- glm(as.formula(formula_str), family = "binomial", data = data_val)
@@ -303,8 +314,8 @@ run_validation <- function(expr_data, group, dataset_name) {
     fp <- sum(pred_class == 1 & data_val$PE_status == 0)
     fn <- sum(pred_class == 0 & data_val$PE_status == 1)
 
-    sensitivity <- ifelse((tp + fn) > 0, tp / (tp + fn), NA)
-    specificity <- ifelse((tn + fp) > 0, tn / (tn + fp), NA)
+    sensitivity <- tp / (tp + fn)   # n_positive > 0 guaranteed above
+    specificity <- tn / (tn + fp)   # n_negative > 0 guaranteed above
     accuracy    <- (tp + tn) / (tp + tn + fp + fn)
 
     cat(sprintf("✓ %s\n", dataset_name))
